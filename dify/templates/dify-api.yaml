@@ -1,0 +1,189 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dify-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dify-api
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dify-api
+  template:
+    metadata:
+      labels:
+        app: dify-api
+    spec:
+      ########################################
+      # Note: DB Migration is handled by dedicated Job (db-migration-job.yaml)
+      # initContainer から migration を外し、Job に一本化
+      # upgrade_db() は exit code を返さず危険なため使用しない
+      ########################################
+      # Security Context for file storage permissions
+      securityContext:
+        fsGroup: 1001  # Dify user GID for file storage access
+      # Main Container: Dify API
+      ########################################
+      containers:
+        - name: dify-api
+          image: "{{ .Values.images.api.repository | default "langgenius/dify-api" }}:{{ .Values.images.api.tag | default .Values.images.tag | default "1.11.4" }}"
+          env:
+            # Dify Secret Key (公式の env 名)
+            - name: DIFY_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: difySecretKey
+            # Plugin Daemon Key (公式の env 名)
+            - name: PLUGIN_DAEMON_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: pluginDaemonKey
+            # Inner API Key for Plugin (公式の env 名)
+            - name: INNER_API_KEY_FOR_PLUGIN
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: difyInnerApiKey
+{{- if .Values.secrets.openaiApiKey }}
+            - name: OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: openaiApiKey
+{{- end }}
+            # Note: MIGRATION_ENABLED は false に設定（Job で migration を実行するため）
+            # upgrade_db() は exit code を返さず危険なため使用しない
+            - name: MIGRATION_ENABLED
+              value: "false"
+            # External URLs (相対パスで動作、external.host不要)
+            # Note: 相対パスを使用することで、固定IP依存を避ける
+            # Ingress経由でアクセス可能なURLは自動判定される
+            # Dify APIは環境変数が空の場合、自動的に相対パスを使用する
+            - name: SERVER_URL
+              value: ""
+            - name: CONSOLE_URL
+              value: ""
+            - name: CONSOLE_API_URL
+              value: ""
+            - name: CONSOLE_WEB_URL
+              value: ""
+            - name: APP_WEB_URL
+              value: ""
+            - name: SERVICE_API_URL
+              value: ""
+            - name: FILES_URL
+              value: ""
+            # Plugin Daemon (内部URLで完結)
+            - name: PLUGIN_DAEMON_URL
+              value: "http://dify-plugin-daemon:5002"
+            - name: PLUGIN_DAEMON_API_URL
+              value: "http://dify-plugin-daemon:5002"
+            # Marketplace configuration
+            {{- if and .Values.dify .Values.dify.marketplace .Values.dify.marketplace.enabled }}
+            - name: MARKETPLACE_ENABLED
+              value: "true"
+            {{- if .Values.dify.marketplace.apiUrl }}
+            - name: MARKETPLACE_API_URL
+              value: {{ .Values.dify.marketplace.apiUrl | quote }}
+            {{- else }}
+            # Default: internal service (fallback)
+            - name: MARKETPLACE_API_URL
+              value: "http://dify-api:5001/console/api/plugins/marketplace"
+            {{- end }}
+            {{- end }}
+            - name: MARKETPLACE_URL
+              value: ""
+            # PostgreSQL
+            - name: DB_HOST
+              value: "dify-postgresql"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-password
+            - name: DB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-database
+            # Redis
+            - name: REDIS_HOST
+              value: "dify-redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dify-redis
+                  key: password
+            # Weaviate
+            - name: VECTOR_STORE
+              value: "weaviate"
+            - name: WEAVIATE_ENDPOINT
+              value: "http://dify-weaviate:8080"
+            - name: WEAVIATE_HOST
+              value: "dify-weaviate"
+            - name: WEAVIATE_PORT
+              value: "8080"
+            - name: WEAVIATE_SCHEME
+              value: "http"
+            # Storage
+            - name: STORAGE_TYPE
+              value: "opendal"
+            - name: OPENDAL_SCHEME
+              value: "fs"
+            - name: OPENDAL_FS_ROOT
+              value: "/storage"
+          ports:
+            - containerPort: 5001
+          volumeMounts:
+            {{- if .Values.dify.fileStorage.enabled }}
+            - name: filestorage
+              mountPath: /storage
+            {{- end }}
+          readinessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5001
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+            limits:
+              memory: "2Gi"
+              cpu: "1000m"
+      volumes:
+        {{- if .Values.dify.fileStorage.enabled }}
+        - name: filestorage
+          persistentVolumeClaim:
+            claimName: dify-filestorage
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dify-api
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app: dify-api
+  ports:
+    - port: 5001
+      targetPort: 5001

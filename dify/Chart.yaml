@@ -1,0 +1,7 @@
+apiVersion: v2
+name: dify
+description: Dify Community Edition on NKP
+type: application
+version: 0.1.0
+appVersion: "1.11.4"
+

@@ -1,0 +1,140 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dify-plugin-daemon
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dify-plugin-daemon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dify-plugin-daemon
+  template:
+    metadata:
+      labels:
+        app: dify-plugin-daemon
+    spec:
+      containers:
+        - name: dify-plugin-daemon
+          image: "{{ .Values.images.pluginDaemon.repository | default "langgenius/dify-plugin-daemon" }}:{{ .Values.images.pluginDaemon.tag | default "0.5.3-local" }}"
+          imagePullPolicy: IfNotPresent
+          env:
+            # Plugin Daemon specific (minimal configuration)
+            # Note: plugin-daemon does NOT use PostgreSQL directly
+            # It only depends on dify-api's internal API
+            - name: SERVER_PORT
+              value: "5002"
+            - name: SERVER_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: pluginDaemonKey
+            - name: DIFY_INNER_API_URL
+              value: "http://dify-api:5001"
+            - name: DIFY_INNER_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: dify-secrets
+                  key: difyInnerApiKey
+            # Plugin Daemon URL (内部URLで完結)
+            - name: PLUGIN_DAEMON_URL
+              value: "http://dify-plugin-daemon:5002"
+            # Plugin Remote Installing (Ingress経由でアクセス可能なURL)
+            # Note: 相対パスで動作するため、external.host不要
+            # 固定IP依存を避けるため、Ingress経由でアクセス可能なURLは自動判定される
+            # PLUGIN_REMOTE_INSTALLING_HOST は空文字列でも動作するが、plugin-daemonが必須チェックをしている場合は localhost を使用
+            - name: PLUGIN_REMOTE_INSTALLING_HOST
+              value: "localhost"
+            - name: PLUGIN_REMOTE_INSTALLING_PORT
+              value: "443"
+            - name: PLUGIN_WORKING_PATH
+              value: "/storage/plugins"
+            # PostgreSQL (required by plugin-daemon code)
+            # Note: DB_PASSWORD is read from Secret to match the actual PostgreSQL password
+            - name: DB_HOST
+              value: "dify-postgresql"
+            - name: DB_PORT
+              value: "5432"
+            - name: DB_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-username
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-password
+            - name: DB_DATABASE
+              valueFrom:
+                secretKeyRef:
+                  name: dify-postgresql
+                  key: postgres-database
+            # Redis (required by plugin-daemon)
+            - name: REDIS_HOST
+              value: "dify-redis"
+            - name: REDIS_PORT
+              value: "6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: dify-redis
+                  key: password
+          ports:
+            - containerPort: 5002
+              name: http
+          volumeMounts:
+            {{- if .Values.dify.fileStorage.enabled }}
+            # Note: RWOの制約を回避するため、plugin-daemonはemptyDirを使用
+            # 実際のプラグインファイルはAPIが管理し、plugin-daemonは実行環境として使用
+            - name: filestorage-temp
+              mountPath: /storage
+            {{- end }}
+          readinessProbe:
+            httpGet:
+              path: /health/check
+              port: 5002
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health/check
+              port: 5002
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "100m"
+            limits:
+              memory: "1Gi"
+              cpu: "500m"
+      volumes:
+        {{- if .Values.dify.fileStorage.enabled }}
+        # Note: RWOの制約を回避するため、plugin-daemonはemptyDirを使用
+        # 実際のプラグインファイルはAPIが管理し、plugin-daemonは実行環境として使用
+        - name: filestorage-temp
+          emptyDir: {}
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dify-plugin-daemon
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app: dify-plugin-daemon
+spec:
+  type: ClusterIP
+  selector:
+    app: dify-plugin-daemon
+  ports:
+    - port: 5002
+      targetPort: 5002
+      protocol: TCP
+      name: http
